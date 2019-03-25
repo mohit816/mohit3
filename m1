@@ -1,0 +1,181 @@
+pip install numpy scipy h5py
+pip install scikit-learn Pillow imutils
+pip install beautifulsoup4
+pip install tensorflow-gpu
+pip install keras
+pip install opencv-contrib-python
+
+# Install Retinanet
+import os
+
+# initialize the base path for the logos dataset
+BASE_PATH = "dataset"
+
+# build the path to the annotations and input images
+ANNOT_PATH = os.path.sep.join([BASE_PATH, 'annotations'])
+IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images'])
+
+# degine the training/testing split
+TRAIN_TEST_SPLIT = 0.75
+
+#  build the path to the output training and test .csv files
+TRAIN_CSV = os.path.sep.join([BASE_PATH, 'train.csv'])
+TEST_CSV = os.path.sep.join([BASE_PATH, 'test.csv'])
+
+# build the path to the output classes CSV files
+CLASSES_CSV = os.path.sep.join([BASE_PATH, 'classes.csv'])
+
+# build the path to the output predictions dir
+OUTPUT_DIR = os.path.sep.join([BASE_PATH, 'predictions'])
+from config import esri_retinanet_config as config
+from bs4 import BeautifulSoup
+from imutils import paths
+import argparse
+import random
+import os
+ap = argparse.ArgumentParser()
+ap.add_argument("-a", "--annotations", default=config.ANNOT_PATH,
+    help='path to annotations')
+ap.add_argument("-i", "--images", default=config.IMAGES_PATH,
+	help="path to images")
+ap.add_argument("-t", "--train", default=config.TRAIN_CSV,
+	help="path to output training CSV file")
+ap.add_argument("-e", "--test", default=config.TEST_CSV,
+	help="path to output test CSV file")
+ap.add_argument("-c", "--classes", default=config.CLASSES_CSV,
+	help="path to output classes CSV file")
+ap.add_argument("-s", "--split", type=float, default=config.TRAIN_TEST_SPLIT,
+	help="train and test split")
+args = vars(ap.parse_args())
+
+# Create easy variable names for all the arguments
+annot_path = args["annotations"]
+images_path = args["images"]
+train_csv = args["train"]
+test_csv = args["test"]
+classes_csv = args["classes"]
+train_test_split = args["split"]
+imagePaths = list(paths.list_files(images_path))
+random.shuffle(imagePaths)
+i = int(len(imagePaths) * train_test_split)
+trainImagePaths = imagePaths[:i]
+testImagePaths = imagePaths[i:]
+
+# create the list of datasets to build
+dataset = [ ("train", trainImagePaths, train_csv),
+            ("test", testImagePaths, test_csv)]
+
+# initialize the set of classes we have
+CLASSES = set()
+for (dType, imagePaths, outputCSV) in dataset:
+    # load the contents
+    print ("[INFO] creating '{}' set...".format(dType))
+    print ("[INFO] {} total images in '{}' set".format(len(imagePaths), dType))
+
+    # open the output CSV file
+    csv = open(outputCSV, "w")
+    
+    # loop over the image paths
+    for imagePath in imagePaths:
+        # build the corresponding annotation path
+        fname = imagePath.split(os.path.sep)[-1]
+        fname = "{}.xml".format(fname[:fname.rfind(".")])
+        annotPath = os.path.sep.join([annot_path, fname])
+
+        # load the contents of the annotation file and buid the soup
+        contents = open(annotPath).read()
+        soup = BeautifulSoup(contents, "html.parser")
+
+        # extract the image dimensions
+        w = int(soup.find("width").string)
+        h = int(soup.find("height").string)
+         for o in soup.find_all("object"):
+            #extract the label and bounding box coordinates
+            label = o.find("name").string
+            xMin = int(float(o.find("xmin").string))
+            yMin = int(float(o.find("ymin").string))
+            xMax = int(float(o.find("xmax").string))
+            yMax = int(float(o.find("ymax").string))
+
+            # truncate any bounding box coordinates that fall outside
+            # the boundaries of the image
+            xMin = max(0, xMin)
+            yMin = max(0, yMin)
+            xMax = min(w, xMax)
+            yMax = min(h, yMax)
+
+            # ignore the bounding boxes where the minimum values are larger
+            # than the maximum values and vice-versa due to annotation errors
+            if xMin >= xMax or yMin >= yMax:
+                continue
+            elif xMax <= xMin or yMax <= yMin:
+                continue
+
+            # write the image path, bb coordinates, label to the output CSV
+            row = [os.path.abspath(imagePath),str(xMin), str(yMin), str(xMax),
+                    str(yMax), str(label)]
+            csv.write("{}\n".format(",".join(row)))
+
+            # update the set of unique class labels
+            CLASSES.add(label)
+
+    # close the CSV file
+    csv.close()
+    print("[INFO] writing classes...")
+csv = open(classes_csv, "w")
+rows = [",".join([c, str(i)]) for (i,c) in enumerate(CLASSES)]
+csv.write("\n".join(rows))
+csv.close()
+# import the necessary packages
+from keras_retinanet.utils.image import preprocess_image
+from keras_retinanet.utils.image import read_image_bgr
+from keras_retinanet.utils.image import resize_image
+from config import esri_retinanet_config as config
+from keras_retinanet import models
+from imutils import paths
+import numpy as np
+import argparse
+import os
+# load the class label mappings
+LABELS = open(args["labels"]).read().strip().split('\n')
+LABELS = {int(L.split(",")[1]): L.split(",")[0] for L in LABELS}
+
+# load the model from disk and grab all input image paths
+model = models.load_model(args["model"], backbone_name='resnet50')
+imagePaths = list(paths.list_images(args["input"]))
+for (i, imagePath) in enumerate(imagePaths):
+
+    print ("[INFO] predicting on image {} of {}".format(i+1, len(imagePaths)))
+
+    # Create the filename to store the predictions in and then open it in write mode
+    filename = (imagePath.split(os.path.sep)[-1]).split('.')[0]
+    output_file = os.path.sep.join([args["output"], '{}.txt'.format(filename)])
+    file = open(output_file, 'w')
+
+    #load the input image (BGR), clone it, and preprocess it
+    image = read_image_bgr(imagePath)
+    image = preprocess_image(image)
+    (image, scale) = resize_image(image)
+    image = np.expand_dims(image, axis=0)
+
+    # detect objects in the input image and correct for the image scale
+    (boxes, scores, labels) = model.predict_on_batch(image)
+    boxes /= scale
+    for (box, score, label) in zip(boxes[0], scores[0], labels[0]):
+        # filter out weak detections
+        if score < args["confidence"]:
+            continue
+
+        # convert the bounding box coordinates from floats to integers
+        box = box.astype("int")
+
+        # Create the row for each prediction in the format:
+        # <classname> <confidence> <ymin> <xmin> <ymax> <xmax>
+        row = " ".join([LABELS[label], str(score),
+                        str(box[1]), str(box[0]), str(box[3]), str(box[2])])
+        # Write each row of prediction in the corresponding txt file
+        file.write("{}\n".format(row))
+
+    # Close the file
+    file.close()
+    
